@@ -185,7 +185,7 @@ function formatUrlResult(response: GeminiResponse, url: string): string {
 // Create MCP server
 const server = new McpServer({
   name: "anti-search",
-  version: "1.1.1",
+  version: "1.1.2",
 });
 
 // Tool: web_search
