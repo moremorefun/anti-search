@@ -28,12 +28,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ihaoliang/anti-search.git"
+    "url": "git+https://github.com/moremorefun/anti-search.git"
   },
   "bugs": {
-    "url": "https://github.com/ihaoliang/anti-search/issues"
+    "url": "https://github.com/moremorefun/anti-search/issues"
   },
-  "homepage": "https://github.com/ihaoliang/anti-search#readme",
+  "homepage": "https://github.com/moremorefun/anti-search#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
