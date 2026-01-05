@@ -32,6 +32,37 @@ interface GeminiResponse {
   error?: { message?: string; code?: number };
 }
 
+// 输出格式类型定义
+interface SearchSource {
+  url: string;
+  site: string;
+  snippet: string;
+}
+
+interface SearchResult {
+  query: string;
+  answer: string;
+  sources: SearchSource[];
+}
+
+interface GroundedSource {
+  url: string;
+  site: string;
+  context: string;  // 更完整的上下文
+}
+
+interface GroundedResult {
+  query: string;
+  answer: string;
+  sources: GroundedSource[];
+}
+
+interface UrlResult {
+  url: string;
+  status: "success" | "failed";
+  content: string;
+}
+
 async function callGemini(
   prompt: string,
   tools: Record<string, object>[]
@@ -53,53 +84,102 @@ async function callGemini(
   return response.json() as Promise<GeminiResponse>;
 }
 
-function formatSearchResult(response: GeminiResponse): string {
+function formatSearchResult(response: GeminiResponse, query: string): string {
   if (response.error) {
-    return `Error: ${response.error.message || "Unknown error"}`;
+    return JSON.stringify({ error: response.error.message || "Unknown error" }, null, 2);
   }
 
   const candidate = response.candidates?.[0];
-  if (!candidate) return "No results";
-
-  const text = candidate.content?.parts?.[0]?.text || "";
-  const chunks = candidate.groundingMetadata?.groundingChunks || [];
-
-  let result = text + "\n\n";
-
-  if (chunks.length > 0) {
-    result += "## Sources\n";
-    chunks.forEach((chunk, i) => {
-      if (chunk.web) {
-        result += `${i + 1}. [${chunk.web.title || chunk.web.domain}](${chunk.web.uri})\n`;
-      }
-    });
+  if (!candidate) {
+    return JSON.stringify({ error: "No results" }, null, 2);
   }
 
-  return result;
+  const meta = candidate.groundingMetadata;
+  const chunks = meta?.groundingChunks || [];
+  const supports = meta?.groundingSupports || [];
+
+  // 构建 chunk 索引 -> snippets 映射
+  const chunkSnippets = new Map<number, string[]>();
+  supports.forEach((support) => {
+    const text = support.segment?.text || "";
+    (support.groundingChunkIndices || []).forEach((idx) => {
+      if (!chunkSnippets.has(idx)) chunkSnippets.set(idx, []);
+      chunkSnippets.get(idx)!.push(text);
+    });
+  });
+
+  const result: SearchResult = {
+    query,
+    answer: candidate.content?.parts?.[0]?.text || "",
+    sources: chunks.map((chunk, i) => ({
+      url: chunk.web?.uri || "",
+      site: chunk.web?.domain || chunk.web?.title || "",
+      snippet: (chunkSnippets.get(i) || []).join(" ").slice(0, 300),
+    })),
+  };
+
+  return JSON.stringify(result, null, 2);
 }
 
-function formatUrlResult(response: GeminiResponse): string {
+function formatGroundedResult(response: GeminiResponse, query: string): string {
   if (response.error) {
-    return `Error: ${response.error.message || "Unknown error"}`;
+    return JSON.stringify({ error: response.error.message || "Unknown error" }, null, 2);
   }
 
   const candidate = response.candidates?.[0];
-  if (!candidate) return "No results";
-
-  const text = candidate.content?.parts?.[0]?.text || "";
-  const urlMeta = candidate.urlContextMetadata?.urlMetadata || [];
-
-  let result = text + "\n\n";
-
-  if (urlMeta.length > 0) {
-    result += "## URL Status\n";
-    urlMeta.forEach((meta) => {
-      const status = meta.urlRetrievalStatus === "URL_RETRIEVAL_STATUS_SUCCESS" ? "✓" : "✗";
-      result += `${status} ${meta.retrievedUrl}\n`;
-    });
+  if (!candidate) {
+    return JSON.stringify({ error: "No results" }, null, 2);
   }
 
-  return result;
+  const meta = candidate.groundingMetadata;
+  const chunks = meta?.groundingChunks || [];
+  const supports = meta?.groundingSupports || [];
+
+  // 构建 chunk 索引 -> 完整 context 映射
+  const chunkContexts = new Map<number, string[]>();
+  supports.forEach((support) => {
+    const text = support.segment?.text || "";
+    (support.groundingChunkIndices || []).forEach((idx) => {
+      if (!chunkContexts.has(idx)) chunkContexts.set(idx, []);
+      chunkContexts.get(idx)!.push(text);
+    });
+  });
+
+  const result: GroundedResult = {
+    query,
+    answer: candidate.content?.parts?.[0]?.text || "",
+    sources: chunks.map((chunk, i) => ({
+      url: chunk.web?.uri || "",
+      site: chunk.web?.domain || chunk.web?.title || "",
+      context: (chunkContexts.get(i) || []).join("\n\n"),  // 完整上下文，不截断
+    })),
+  };
+
+  return JSON.stringify(result, null, 2);
+}
+
+function formatUrlResult(response: GeminiResponse, url: string): string {
+  if (response.error) {
+    return JSON.stringify({ error: response.error.message || "Unknown error" }, null, 2);
+  }
+
+  const candidate = response.candidates?.[0];
+  if (!candidate) {
+    return JSON.stringify({ error: "No results" }, null, 2);
+  }
+
+  const urlMeta = candidate.urlContextMetadata?.urlMetadata || [];
+  const statusInfo = urlMeta.find((m) => m.retrievedUrl === url) || urlMeta[0];
+
+  const result: UrlResult = {
+    url: statusInfo?.retrievedUrl || url,
+    status: statusInfo?.urlRetrievalStatus === "URL_RETRIEVAL_STATUS_SUCCESS"
+      ? "success"
+      : "failed",
+    content: candidate.content?.parts?.[0]?.text || "",
+  };
+
+  return JSON.stringify(result, null, 2);
 }
 
 // Create MCP server
@@ -115,7 +195,7 @@ server.tool(
   { query: z.string().describe("Search query") },
   async ({ query }) => {
     const response = await callGemini(query, [{ googleSearch: {} }]);
-    return { content: [{ type: "text", text: formatSearchResult(response) }] };
+    return { content: [{ type: "text", text: formatSearchResult(response, query) }] };
   }
 );
 
@@ -132,7 +212,7 @@ server.tool(
       ? `${instruction}: ${url}`
       : `Summarize the content from ${url}`;
     const response = await callGemini(prompt, [{ urlContext: {} }]);
-    return { content: [{ type: "text", text: formatUrlResult(response) }] };
+    return { content: [{ type: "text", text: formatUrlResult(response, url) }] };
   }
 );
 
@@ -148,7 +228,7 @@ server.tool(
       { googleSearch: {} },
       { urlContext: {} }
     ]);
-    return { content: [{ type: "text", text: formatSearchResult(response) }] };
+    return { content: [{ type: "text", text: formatGroundedResult(response, query) }] };
   }
 );
 
