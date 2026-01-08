@@ -53,26 +53,37 @@ interface UrlResult {
 
 async function callGemini(
   prompt: string,
-  tools: Record<string, object>[]
+  tools: Record<string, object>[],
+  systemInstruction?: string
 ): Promise<GeminiResponse> {
   const url = `${BASE_URL}/v1beta/models/${MODEL}:generateContent`;
-  
+
+  const body: Record<string, unknown> = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    tools,
+  };
+
+  if (systemInstruction) {
+    body.systemInstruction = {
+      parts: [{ text: systemInstruction }],
+      role: "user"
+    };
+    body.generationConfig = { candidateCount: 1 };
+  }
+
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${API_KEY}`,
     },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      tools,
-    }),
+    body: JSON.stringify(body),
   });
 
   return response.json() as Promise<GeminiResponse>;
 }
 
-function formatSearchResult(response: GeminiResponse, query: string): string {
+function formatSearchResult(response: GeminiResponse, _query: string): string {
   if (response.error) {
     return `Error: ${response.error.message || "Unknown error"}`;
   }
@@ -86,40 +97,36 @@ function formatSearchResult(response: GeminiResponse, query: string): string {
   const chunks = meta?.groundingChunks || [];
   const supports = meta?.groundingSupports || [];
 
-  // 构建 chunk 索引 -> snippets 映射
-  const chunkSnippets = new Map<number, string[]>();
+  // 构建回答文本，在每个片段后插入引用编号 [1][2][3]
+  let answer = "";
   supports.forEach((support) => {
     const text = support.segment?.text || "";
-    (support.groundingChunkIndices || []).forEach((idx) => {
-      if (!chunkSnippets.has(idx)) chunkSnippets.set(idx, []);
-      chunkSnippets.get(idx)!.push(text);
-    });
+    const indices = support.groundingChunkIndices || [];
+    const refs = indices.map(i => `[${i + 1}]`).join("");
+    answer += text + refs;
   });
 
-  const answer = candidate.content?.parts?.[0]?.text || "";
+  // 如果 supports 为空，fallback 到原始文本
+  if (!answer) {
+    answer = candidate.content?.parts?.[0]?.text || "";
+  }
 
-  // 构建 sources 列表，格式为 markdown hyperlinks
+  // 构建 Sources 列表，使用编号格式
   const sources = chunks
     .map((chunk, i) => {
       const url = chunk.web?.uri || "";
       const title = chunk.web?.title || chunk.web?.domain || url;
-      const snippet = (chunkSnippets.get(i) || []).join(" ").slice(0, 200);
       if (!url) return null;
-      return { url, title, snippet };
+      return { index: i + 1, url, title };
     })
-    .filter((s): s is { url: string; title: string; snippet: string } => s !== null);
+    .filter((s): s is { index: number; url: string; title: string } => s !== null);
 
-  // 格式化输出，兼容 Claude Code WebSearch 格式
   let output = answer;
 
   if (sources.length > 0) {
     output += "\n\nSources:\n";
     sources.forEach((source) => {
-      output += `- [${source.title}](${source.url})`;
-      if (source.snippet) {
-        output += `: ${source.snippet}`;
-      }
-      output += "\n";
+      output += `[${source.index}] [${source.title}](${source.url})\n`;
     });
   }
 
@@ -190,10 +197,12 @@ function formatUrlResult(response: GeminiResponse, url: string): string {
 // Create MCP server
 const server = new McpServer({
   name: "anti-search",
-  version: "1.2.0",
+  version: "1.3.0",
 });
 
 // Tool: web_search (兼容 Claude Code WebSearch 格式)
+const SEARCH_SYSTEM_PROMPT = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.";
+
 server.tool(
   "web_search",
   "Search the web using Google Search via Antigravity. Returns search results with markdown hyperlinks in Sources section.",
@@ -202,10 +211,10 @@ server.tool(
     allowed_domains: z.array(z.string()).optional().describe("Only include search results from these domains"),
     blocked_domains: z.array(z.string()).optional().describe("Never include search results from these domains")
   },
-  async ({ query, allowed_domains, blocked_domains }) => {
+  async ({ query, allowed_domains: _allowed, blocked_domains: _blocked }) => {
     // 注意: allowed_domains 和 blocked_domains 参数当前被忽略
     // Gemini API 的 googleSearch 不支持域名过滤，需要后处理实现
-    const response = await callGemini(query, [{ googleSearch: {} }]);
+    const response = await callGemini(query, [{ googleSearch: {} }], SEARCH_SYSTEM_PROMPT);
     return { content: [{ type: "text", text: formatSearchResult(response, query) }] };
   }
 );
