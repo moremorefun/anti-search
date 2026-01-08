@@ -33,18 +33,6 @@ interface GeminiResponse {
 }
 
 // 输出格式类型定义
-interface SearchSource {
-  url: string;
-  site: string;
-  snippet: string;
-}
-
-interface SearchResult {
-  query: string;
-  answer: string;
-  sources: SearchSource[];
-}
-
 interface GroundedSource {
   url: string;
   site: string;
@@ -86,12 +74,12 @@ async function callGemini(
 
 function formatSearchResult(response: GeminiResponse, query: string): string {
   if (response.error) {
-    return JSON.stringify({ error: response.error.message || "Unknown error" }, null, 2);
+    return `Error: ${response.error.message || "Unknown error"}`;
   }
 
   const candidate = response.candidates?.[0];
   if (!candidate) {
-    return JSON.stringify({ error: "No results" }, null, 2);
+    return "No results found.";
   }
 
   const meta = candidate.groundingMetadata;
@@ -108,17 +96,34 @@ function formatSearchResult(response: GeminiResponse, query: string): string {
     });
   });
 
-  const result: SearchResult = {
-    query,
-    answer: candidate.content?.parts?.[0]?.text || "",
-    sources: chunks.map((chunk, i) => ({
-      url: chunk.web?.uri || "",
-      site: chunk.web?.domain || chunk.web?.title || "",
-      snippet: (chunkSnippets.get(i) || []).join(" ").slice(0, 300),
-    })),
-  };
+  const answer = candidate.content?.parts?.[0]?.text || "";
 
-  return JSON.stringify(result, null, 2);
+  // 构建 sources 列表，格式为 markdown hyperlinks
+  const sources = chunks
+    .map((chunk, i) => {
+      const url = chunk.web?.uri || "";
+      const title = chunk.web?.title || chunk.web?.domain || url;
+      const snippet = (chunkSnippets.get(i) || []).join(" ").slice(0, 200);
+      if (!url) return null;
+      return { url, title, snippet };
+    })
+    .filter((s): s is { url: string; title: string; snippet: string } => s !== null);
+
+  // 格式化输出，兼容 Claude Code WebSearch 格式
+  let output = answer;
+
+  if (sources.length > 0) {
+    output += "\n\nSources:\n";
+    sources.forEach((source) => {
+      output += `- [${source.title}](${source.url})`;
+      if (source.snippet) {
+        output += `: ${source.snippet}`;
+      }
+      output += "\n";
+    });
+  }
+
+  return output;
 }
 
 function formatGroundedResult(response: GeminiResponse, query: string): string {
@@ -185,15 +190,21 @@ function formatUrlResult(response: GeminiResponse, url: string): string {
 // Create MCP server
 const server = new McpServer({
   name: "anti-search",
-  version: "1.1.2",
+  version: "1.2.0",
 });
 
-// Tool: web_search
+// Tool: web_search (兼容 Claude Code WebSearch 格式)
 server.tool(
   "web_search",
-  "Search the web using Google Search via Antigravity",
-  { query: z.string().describe("Search query") },
-  async ({ query }) => {
+  "Search the web using Google Search via Antigravity. Returns search results with markdown hyperlinks in Sources section.",
+  {
+    query: z.string().describe("Search query"),
+    allowed_domains: z.array(z.string()).optional().describe("Only include search results from these domains"),
+    blocked_domains: z.array(z.string()).optional().describe("Never include search results from these domains")
+  },
+  async ({ query, allowed_domains, blocked_domains }) => {
+    // 注意: allowed_domains 和 blocked_domains 参数当前被忽略
+    // Gemini API 的 googleSearch 不支持域名过滤，需要后处理实现
     const response = await callGemini(query, [{ googleSearch: {} }]);
     return { content: [{ type: "text", text: formatSearchResult(response, query) }] };
   }
