@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import pkg from "../package.json";
 
 const BASE_URL = process.env.ANTI_BASE_URL || "http://localhost:8317";
 const API_KEY = process.env.ANTI_API_KEY || "dummy";
@@ -196,8 +197,8 @@ function formatUrlResult(response: GeminiResponse, url: string): string {
 
 // Create MCP server
 const server = new McpServer({
-  name: "anti-search",
-  version: "1.3.0",
+  name: pkg.name,
+  version: pkg.version,
 });
 
 // Tool: web_search (兼容 Claude Code WebSearch 格式)
